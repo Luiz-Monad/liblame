@@ -1,0 +1,109 @@
+name: Mirror SVN to Git
+
+on:
+  schedule:
+    # Run every 6 hours (adjust as needed)
+    - cron: '0 */6 * * *'
+
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: 'Run with debug'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  svn-mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Git SSH
+        uses: webfactory/ssh-agent@v0.5.4
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Install svn and git
+        run: |
+          sudo apt-get update
+          sudo apt-get remove git git-man
+          sudo apt-get install -y git git-svn
+
+      - name: Debug
+        if: ${{ github.event.inputs.debug == 'true' }}
+        run: |
+          git clone "git@github.com:${{ github.repository }}.git" debug --branch main
+          cd debug/.github/workflows
+          sudo chmod +x ./debug.sh
+          sudo \
+            NGROK_SSH_PUBKEY="${{ secrets.NGROK_SSH_PUBKEY }}" \
+            NGROK_TOKEN="${{ secrets.NGROK_TOKEN }}" \
+            ./debug.sh
+          bash -c 'exec -a "PAUSED_SCRIPT" sleep infinity'
+
+      - name: Setup Git Configuration
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global init.defaultBranch master
+
+      - name: Cache SVN Repository
+        uses: actions/cache@v3
+        with:
+          path: repo
+          key: svn-repo-${{ github.run_id }}
+          restore-keys: |
+            svn-repo-
+
+      - name: Clone/Update from SVN
+        run: |
+          if [ -d "repo/.git/svn" ]; then
+            echo "Existing git-svn repo found, updating..."
+            cd repo
+            git svn fetch
+            git svn rebase
+          else
+            echo "Cloning fresh from SVN..."
+            # Clone the lame subdirectory as root - this is the actual project
+            git svn clone https://svn.code.sf.net/p/lame/svn/trunk/lame/ repo
+            cd repo
+          fi
+
+          # Show current state for debugging
+          echo "Git log:"
+          git log --oneline -5 2>/dev/null || echo "No commits yet"
+          echo "All references:"
+          git show-ref
+          echo "Branches:"
+          git branch -a
+
+      - name: Setup GitHub Remote and Push
+        run: |
+          cd repo
+          # Add GitHub remote (remove if exists to avoid conflicts)
+
+          echo "Adding remote..."
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "git@github.com:${{ github.repository }}.git"
+
+          # Fetch existing branches from GitHub
+          git fetch origin || echo "No remote branches yet"
+          
+          # Create/update SVN branch from git-svn
+          if ! git show-ref --verify --quiet refs/heads/svn-mirror; then
+            git checkout -b svn-mirror refs/remotes/git-svn
+          else
+            git checkout svn-mirror
+            git reset --hard refs/remotes/git-svn
+          fi
+          
+          # Push SVN branch to GitHub
+          git push origin svn-mirror --force
+          
+          # Now handle master branch
+          echo "GitHub master exists, checking out and merging SVN updates..."
+          git checkout -B master origin/master
+          git merge svn-mirror --allow-unrelated-histories -m "Merge SVN updates from svn-mirror branch"
+          
+          # Push master to GitHub
+          git push origin master
