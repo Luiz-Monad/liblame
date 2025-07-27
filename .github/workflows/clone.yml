@@ -60,6 +60,7 @@ jobs:
           if [ -d "repo/.git/svn" ]; then
             echo "Existing git-svn repo found, updating..."
             cd repo
+            git checkout svn-mirror
             git svn fetch
             git svn rebase
           else
